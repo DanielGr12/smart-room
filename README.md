@@ -66,10 +66,12 @@ the board doesn't require redoing any of the above.
 ## Protections in place
 
 This device sits on your home WiFi, which was a deliberate, carefully
-considered trade-off (see project history/conversation for the full
-reasoning — several non-WiFi approaches were tried first and hit real
-platform limitations). The following layers are specifically meant to
-keep that exposure small and contained:
+considered trade-off — a Bluetooth-only design was tried first
+specifically to avoid this, but hit a real platform limitation (iOS
+Shortcuts has no native way to write to a custom BLE characteristic
+without either a paid third-party app or a self-built companion app
+requiring Developer Mode). The following layers are specifically meant
+to keep the WiFi exposure small and contained:
 
 | Layer | What it does |
 |---|---|
@@ -103,12 +105,3 @@ design gives an attacker a path to any other device on your network.
 - `esp32/homekit_light/` — **the current, working firmware.**
 - `esp32/capture_433/` — standalone sketch to sniff a remote's codes
   (run this first, on any new remote).
-- `esp32/ble_light_control/`, `esp32/ble_capture_433/`,
-  `esp32/ble_pin_test/`, `esp32/raw_pin_test/` — earlier BLE-based
-  prototypes and hardware diagnostics from before the project settled
-  on HomeKit. Kept for reference; not part of the current setup.
-- `ios/` — an alternate, unused companion-app approach (Swift +
-  CoreBluetooth + App Intents) from the BLE era. Not needed with the
-  current HomeKit-based firmware, kept for reference.
-- `vision/` — an earlier, separate Raspberry Pi + camera gesture-based
-  approach, superseded by the ESP32/HomeKit design above.
