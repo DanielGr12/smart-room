@@ -1,6 +1,7 @@
 *.pyc
 __pycache__/
 vision/venv/
+.DS_Store
 
 # PlatformIO
 .pio/
@@ -8,3 +9,6 @@ vision/venv/
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Never commit real WiFi credentials
+esp32/homekit_light/include/secrets.h

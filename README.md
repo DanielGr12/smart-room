@@ -1,118 +1,114 @@
-# Gesture-to-Light (Raspberry Pi + 433MHz)
+# Smart Room Light — HomeKit-controlled 433MHz remote replacement
 
-Raise your hand, held for ~1s, anywhere in the room (even in the dark) → a
-Raspberry Pi running local pose detection spots it and directly transmits
-your light remote's 433MHz code from its own GPIO pins. Single board, no
-microcontroller needed.
+Replaces a physical 433MHz remote (light on/off, 4 timer presets, 4 fan
+speeds) with native Apple HomeKit control — usable from the Home app,
+Siri, Control Center, and automatically from the iOS Shortcuts app, with
+no companion app, no paid third-party software, and no phone-side
+developer setup required.
 
-## Parts
+## How it works
 
-- Raspberry Pi with WiFi/camera support (Zero 2 W is plenty)
-- Raspberry Pi Camera Module, **NoIR** variant (no IR-cut filter → works in the dark) + the correct CSI ribbon cable for your Pi
-- A small 850nm/940nm IR illuminator board (CCTV night-vision type, often has an auto light-sensor switch)
-- 433MHz receiver module (e.g. RXB6) — only needed temporarily, for sniffing your remote's code
-- 433MHz transmitter module (e.g. FS1000A)
-- microSD card, 5V power supply
-
-## Architecture
+An ESP32-C3 sniffs and replays the remote's 433MHz codes (via
+[`rc-switch`](https://github.com/sui77/rc-switch)) and exposes each
+button as a native HomeKit accessory (via
+[HomeSpan](https://github.com/HomeSpan/HomeSpan)) — no bridge, no
+server, no other always-on device involved.
 
 ```
-[IR illuminator + NoIR camera] -> [Raspberry Pi: MediaPipe Pose, local only]
-                                          |
-                                   direct GPIO (rpi-rf)
-                                          v
-                              [433MHz TX module -> your light]
+[iPhone: Home app / Siri / Shortcuts]
+              |  HomeKit Accessory Protocol (WiFi, encrypted)
+              v
+[ESP32-C3: HomeSpan + RCSwitch]
+              |  433MHz OOK/ASK, replaying captured codes
+              v
+[Light + fan remote receiver]
 ```
 
-Everything — camera capture, pose detection, and the RF transmit — runs on
-the one Pi. No cloud vision API, no network hop for the trigger.
+Each of the 9 buttons is a "momentary switch" accessory: turning it on
+fires the matching 433MHz code, then it auto-resets to off about half a
+second later. That's deliberate — the remote's codes are fixed/toggle
+codes with no feedback of real state, so pretending to track true
+on/off state in HomeKit would just drift out of sync the moment the
+original physical remote is used directly. A button-style accessory
+makes no promise it can't keep.
 
-## Wiring (BCM GPIO numbering)
+## Hardware
 
-| Module              | Pin  | Raspberry Pi |
-|---------------------|------|--------------|
-| 433MHz RX (sniffing)| DATA | GPIO27       |
-| 433MHz TX           | DATA | GPIO17       |
+- ESP32-C3 "SuperMini" board
+- 433MHz receiver module — only needed temporarily, to capture your
+  remote's codes (see `esp32/capture_433`)
+- 433MHz transmitter module, wired to the pin in
+  `esp32/homekit_light/src/main.cpp` (`TRANSMIT_PIN`)
 
-Power the RX/TX modules per their datasheet (most run on 5V, with 3.3V-logic-compatible DATA pins — double check yours before wiring DATA straight to a GPIO). Share GND with the Pi.
+## Setup
 
-## 1. Set up the Pi
+1. Flash `esp32/homekit_light` with PlatformIO (`pio run -t upload`).
+2. Copy `esp32/homekit_light/include/secrets.h.example` to `secrets.h`
+   in the same folder and fill in your own HomeKit setup code (8
+   digits, no dashes, not sequential/repeating). This file is
+   gitignored and must never be committed.
+3. **WiFi credentials are never hardcoded.** On first boot with nothing
+   stored in flash, the device opens its own temporary WiFi network
+   (`RoomLight-Setup`) hosting a small web form. Connect your phone to
+   it once, enter your real WiFi info there, and it's saved directly to
+   the device's flash (NVS) — never touches source code or git. If you
+   ever need to reprovision, trigger this again over the serial CLI
+   (`A`) or by fully erasing flash.
+4. In the Home app: **+** → **Add Accessory** → **More options...** →
+   select the device → enter your setup code from step 2.
+5. Once paired, all 9 accessories automatically appear as individual
+   Shortcuts actions in the Shortcuts app — no additional setup needed.
 
-Use 64-bit Raspberry Pi OS (needed for MediaPipe wheels). Enable the camera
-in `raspi-config`, then:
+WiFi credentials and HomeKit pairing are both stored in flash (NVS),
+not RAM — they survive power loss and reboots indefinitely. Unplugging
+the board doesn't require redoing any of the above.
 
-```
-cd vision
-python3 -m venv venv --system-site-packages
-source venv/bin/activate
-pip install -r requirements.txt
-pip install picamera2  # if not already present system-wide
-```
+## Protections in place
 
-`rpi-rf` talks to GPIO via RPi.GPIO, which needs either root or the `gpio`
-group — run sniff.py/gesture_trigger.py with `sudo` or add your user to
-that group.
+This device sits on your home WiFi, which was a deliberate, carefully
+considered trade-off (see project history/conversation for the full
+reasoning — several non-WiFi approaches were tried first and hit real
+platform limitations). The following layers are specifically meant to
+keep that exposure small and contained:
 
-## 2. Sniff your light remote's code
+| Layer | What it does |
+|---|---|
+| **HomeKit Accessory Protocol (HAP)** | Pairing uses SRP-6a (3072-bit) — the setup code is never transmitted over the air. Sessions use Ed25519 identity keys + Curve25519 session keys, encrypted with ChaCha20-Poly1305, with perfect forward secrecy. This is the same protocol every certified "Works with Apple HomeKit" product uses. |
+| **No BLE** | The firmware never initializes the Bluetooth stack — one less radio/attack surface, now that WiFi/HomeKit is the only control path. |
+| **No OTA** | `homeSpan.enableOTA()` is intentionally never called — there is no remote firmware-update surface at all. |
+| **No hardcoded credentials** | WiFi credentials never appear in source code (see Setup above). The HomeKit setup code lives in a gitignored `secrets.h`. |
+| **No remote access (recommended)** | Don't add a Home Hub (Apple TV/HomePod/iPad) for this accessory and don't enable "Allow Remote Access." That keeps the WAN attack surface at literally zero — reachable only by something physically on your home WiFi. |
+| **Network isolation (recommended, configure on your router)** | Put the device on an isolated VLAN/guest SSID with firewall rules blocking it from reaching any other device on your LAN, and blocking all outbound internet access. Even in a worst case, it has nowhere to pivot to and can't phone home. |
 
-Wire the 433MHz receiver (GPIO27), then:
+### Honest residual risks — not fixed by any of the above
 
-```
-python3 sniff.py
-```
+- **The 433MHz replay itself is unauthenticated.** The remote uses a
+  fixed, non-rolling code — anyone within RF range with a cheap
+  transmitter could always replay it directly, bypassing WiFi,
+  HomeKit, and every protection above entirely. This was true the day
+  the physical remote was purchased and is a property of the
+  light/fan hardware itself, not something firmware can fix.
+- **HomeSpan is a community reimplementation of HAP**, not Apple's own
+  certified/audited MFi stack. It's mature and widely used, but
+  carries whatever implementation bugs exist in that project
+  specifically.
 
-Press your real remote's ON button several times near the receiver. Note
-the printed `code`, `bit length`, `pulse length`, `protocol`. Confirm the
-value repeats identically across presses (if it changes every press, it's
-a rolling code and this approach won't work).
+Realistic worst case: someone toggles the light, sets a timer, or
+changes the fan speed — either via the always-possible RF replay, or
+in the unlikely case of an unpatched HomeSpan bug. Nothing in this
+design gives an attacker a path to any other device on your network.
 
-You can unwire the receiver after this step if you like — it's not needed
-at runtime.
+## Repo layout
 
-## 3. Configure the code values
-
-Set them as environment variables (matches the systemd service file), or
-edit the defaults directly in [vision/config.py](vision/config.py):
-
-```
-export CODE_VALUE=5592371
-export CODE_BIT_LENGTH=24
-export CODE_PULSE_LENGTH=350
-export CODE_PROTOCOL=1
-```
-
-## 4. Test the transmitter
-
-Wire the 433MHz transmitter (GPIO17), then quickly sanity check it fires:
-
-```
-python3 -c "import rf_control; rf_control.send_code()"
-```
-
-Your light should toggle.
-
-## 5. Run the gesture detector
-
-```
-python3 gesture_trigger.py
-```
-
-Raise your hand and hold it for ~1s — you should see "Trigger sent" in the
-terminal and the light should toggle.
-
-Mount the camera + IR illuminator somewhere overviewing the room, then run
-it permanently as a service:
-
-```
-cp gesture-trigger.service.example /etc/systemd/system/gesture-trigger.service
-# edit the CODE_* values and paths in that file first
-sudo systemctl daemon-reload
-sudo systemctl enable --now gesture-trigger
-```
-
-## Tuning (vision/config.py)
-
-- `HOLD_SECONDS` — how long the hand must stay raised before it counts. Raise this if incidental arm movement ever triggers it.
-- `COOLDOWN_SECONDS` — minimum time between triggers, so one gesture can't double-toggle the light.
-- `WRIST_ABOVE_SHOULDER_MARGIN` — how far above the shoulder the wrist must be, in normalized frame coordinates.
-- `TX_REPEAT` — how many times the code is repeated per send; raise if the light misses triggers, lower if you notice lag.
+- `esp32/homekit_light/` — **the current, working firmware.**
+- `esp32/capture_433/` — standalone sketch to sniff a remote's codes
+  (run this first, on any new remote).
+- `esp32/ble_light_control/`, `esp32/ble_capture_433/`,
+  `esp32/ble_pin_test/`, `esp32/raw_pin_test/` — earlier BLE-based
+  prototypes and hardware diagnostics from before the project settled
+  on HomeKit. Kept for reference; not part of the current setup.
+- `ios/` — an alternate, unused companion-app approach (Swift +
+  CoreBluetooth + App Intents) from the BLE era. Not needed with the
+  current HomeKit-based firmware, kept for reference.
+- `vision/` — an earlier, separate Raspberry Pi + camera gesture-based
+  approach, superseded by the ESP32/HomeKit design above.
